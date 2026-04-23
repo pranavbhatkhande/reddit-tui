@@ -4,6 +4,27 @@ All notable changes to **reddit-tui** are documented here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **HTTP 403 on anonymous browsing** (macOS and other platforms).
+  - Updated `DEFAULT_USER_AGENT` to point at the correct repo URL
+    (`pranavbhatkhande/reddit-tui`; the old `anomalyco` org does not exist).
+  - Version is now pulled dynamically from `reddit_tui.__version__` so the
+    UA stays in sync with `pyproject.toml`.
+  - A stable per-install suffix (first 8 hex chars of a SHA-256 hash of the
+    hostname + username) is appended so the UA is not byte-identical across
+    every install — which is what Reddit's anti-abuse layer was penalizing.
+  - The `REDDIT_TUI_USER_AGENT` environment variable can override the
+    computed UA entirely.
+  - Anonymous `GET` requests to `www.reddit.com` that return HTTP 403 are
+    now transparently retried once against `old.reddit.com`, which is more
+    permissive for unauthenticated reads.
+  - Anonymous 403 errors that survive the fallback now surface a friendlier
+    message suggesting logging in or setting `REDDIT_TUI_USER_AGENT`.
+  - Authenticated (`oauth.reddit.com`) 403 responses are unchanged and do
+    not trigger the fallback.
+
 ## [0.3.0] — 2026-04-23
 
 This is a substantial hardening release: the network layer is now async,

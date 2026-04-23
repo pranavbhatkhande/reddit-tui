@@ -24,9 +24,9 @@ from pathlib import Path
 
 import httpx
 
-DEFAULT_USER_AGENT = (
-    "reddit-tui/0.3.0 (terminal browser; +https://github.com/anomalyco/reddit-tui)"
-)
+from reddit_tui.reddit_client import DEFAULT_USER_AGENT as _DEFAULT_UA
+
+DEFAULT_USER_AGENT = _DEFAULT_UA
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 TIMEOUT = 15.0
 
