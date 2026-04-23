@@ -8,7 +8,7 @@ state; on each move we rebuild the Group (cheap) and update the Static.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from rich.console import Group, RenderableType
 from rich.text import Text
@@ -38,8 +38,8 @@ DEPTH_COLORS = [
 ]
 
 
-def _wrap_text(text: str, width: int = 100) -> List[str]:
-    out: List[str] = []
+def _wrap_text(text: str, width: int = 100) -> list[str]:
+    out: list[str] = []
     for raw_line in text.splitlines() or [""]:
         line = raw_line
         if not line:
@@ -55,7 +55,7 @@ def _wrap_text(text: str, width: int = 100) -> List[str]:
     return out
 
 
-def _indent_with_guides(lines: List[str], depth: int) -> List[str]:
+def _indent_with_guides(lines: list[str], depth: int) -> list[str]:
     if depth == 0:
         return lines
     bars = ""
@@ -77,9 +77,9 @@ def _score_color(score: int) -> str:
     return "#8a90a3"
 
 
-def _flatten(items: Sequence[object]) -> List[object]:
+def _flatten(items: Sequence[object]) -> list[object]:
     """Flatten the comment tree in display order (Comment | MoreComments)."""
-    out: List[object] = []
+    out: list[object] = []
 
     def walk(seq: Sequence[object]) -> None:
         for it in seq:
@@ -111,8 +111,8 @@ class PostScreen(Screen):
         super().__init__()
         self.client = client
         self.post = post
-        self.top_items: List[object] = []  # tree (Comment | MoreComments)
-        self._flat: List[object] = []  # flattened display order
+        self.top_items: list[object] = []  # tree (Comment | MoreComments)
+        self._flat: list[object] = []  # flattened display order
         self._focused_idx: int = -1  # -1 means post focused
 
     def compose(self) -> ComposeResult:
@@ -225,7 +225,7 @@ class PostScreen(Screen):
             self.post.name = fresh.name
         self._refresh_post_card()
 
-    def _render_tree(self, items: List[object]) -> None:
+    def _render_tree(self, items: list[object]) -> None:
         self.top_items = items
         self._flat = _flatten(items)
         self.query_one("#comments-title", Static).update(
@@ -245,7 +245,7 @@ class PostScreen(Screen):
 
     def _build_renderable(self) -> RenderableType:
         """Build a Rich Group containing one Text per item in display order."""
-        parts: List[RenderableType] = []
+        parts: list[RenderableType] = []
         for i, item in enumerate(self._flat):
             focused = i == self._focused_idx
             if isinstance(item, Comment):
@@ -344,7 +344,7 @@ class PostScreen(Screen):
 
     # ---------- focused item ----------
 
-    def _focused_thing(self) -> Optional[Tuple[str, object]]:
+    def _focused_thing(self) -> tuple[str, object] | None:
         if self._focused_idx == -1:
             if not self.post.name:
                 return None
@@ -533,7 +533,7 @@ class PostScreen(Screen):
             return
         self._splice_more(placeholder, new_items)
 
-    def _splice_more(self, placeholder: MoreComments, new_items: List[object]) -> None:
+    def _splice_more(self, placeholder: MoreComments, new_items: list[object]) -> None:
         """Replace ``placeholder`` in the tree with ``new_items``, re-threading
         any items whose parent_id matches an existing comment."""
         # Build index of all comments by fullname
@@ -551,14 +551,13 @@ class PostScreen(Screen):
         # Re-thread fetched items: those whose parent is in index get appended
         # to that parent's replies; the rest go in a flat list to splice in
         # place of the placeholder.
-        flat_replacement: List[object] = []
+        flat_replacement: list[object] = []
         for it in new_items:
             parent = None
             if isinstance(it, Comment):
                 parent = index.get(getattr(it, "name", ""))  # avoid dup
                 if parent is not None:
                     continue  # already present
-                pid = ""
                 # parent_id is on raw json, not on our Comment dataclass; rely
                 # on depth heuristic and placeholder's depth instead.
                 # Adjust depth based on placeholder depth.
@@ -569,7 +568,7 @@ class PostScreen(Screen):
             flat_replacement.append(it)
 
         # Splice into the tree: find placeholder and replace.
-        def replace_in(seq: List[object]) -> bool:
+        def replace_in(seq: list[object]) -> bool:
             for i, x in enumerate(seq):
                 if x is placeholder:
                     seq[i : i + 1] = flat_replacement

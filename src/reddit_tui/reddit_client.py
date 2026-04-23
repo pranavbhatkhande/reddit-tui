@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import time
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, List, Optional
 
 import httpx
 
@@ -60,11 +60,11 @@ class Post:
     is_self: bool
     domain: str
     over_18: bool
-    likes: Optional[bool] = None  # True=upvoted, False=downvoted, None=no vote
+    likes: bool | None = None  # True=upvoted, False=downvoted, None=no vote
     saved: bool = False
 
     @classmethod
-    def from_json(cls, data: dict) -> "Post":
+    def from_json(cls, data: dict) -> Post:
         d = data.get("data", data)
         return cls(
             id=d.get("id", ""),
@@ -95,17 +95,17 @@ class Comment:
     score: int
     created_utc: float
     depth: int = 0
-    likes: Optional[bool] = None
+    likes: bool | None = None
     saved: bool = False
-    replies: List[object] = field(default_factory=list)  # List[Comment | MoreComments]
+    replies: list[object] = field(default_factory=list)  # List[Comment | MoreComments]
 
     @classmethod
-    def from_json(cls, data: dict, depth: int = 0) -> Optional["Comment"]:
+    def from_json(cls, data: dict, depth: int = 0) -> Comment | None:
         if data.get("kind") != "t1":
             return None
         d = data.get("data", {})
         replies_data = d.get("replies")
-        replies: List[object] = []
+        replies: list[object] = []
         if isinstance(replies_data, dict):
             for child in replies_data.get("data", {}).get("children", []):
                 kind = child.get("kind")
@@ -140,10 +140,10 @@ class MoreComments:
     parent_id: str
     count: int
     depth: int
-    children: List[str] = field(default_factory=list)
+    children: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_json(cls, data: dict, depth: int = 0) -> Optional["MoreComments"]:
+    def from_json(cls, data: dict, depth: int = 0) -> MoreComments | None:
         if data.get("kind") != "more":
             return None
         d = data.get("data", {})
@@ -171,7 +171,7 @@ class InboxItem:
     subreddit: str
 
     @classmethod
-    def from_json(cls, data: dict) -> Optional["InboxItem"]:
+    def from_json(cls, data: dict) -> InboxItem | None:
         kind = data.get("kind")
         if kind not in {"t1", "t4"}:
             return None
@@ -199,9 +199,9 @@ class RedditClient:
 
     def __init__(
         self,
-        token_provider: Optional[TokenProvider] = None,
-        username: Optional[str] = None,
-        user_agent: Optional[str] = None,
+        token_provider: TokenProvider | None = None,
+        username: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self._token_provider = token_provider
         self.username = username
@@ -213,11 +213,11 @@ class RedditClient:
             http2=False,
         )
         # Last seen rate-limit headers (for diagnostics / future backoff).
-        self.rl_remaining: Optional[float] = None
-        self.rl_reset_at: Optional[float] = None
+        self.rl_remaining: float | None = None
+        self.rl_reset_at: float | None = None
         self._rl_lock = asyncio.Lock()
 
-    async def __aenter__(self) -> "RedditClient":
+    async def __aenter__(self) -> RedditClient:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -230,7 +230,7 @@ class RedditClient:
     def authenticated(self) -> bool:
         return self._token_provider is not None
 
-    async def _token(self) -> Optional[str]:
+    async def _token(self) -> str | None:
         if self._token_provider is None:
             return None
         return await self._token_provider()
@@ -266,7 +266,7 @@ class RedditClient:
         url: str,
         *,
         method: str = "GET",
-        data: Optional[dict] = None,
+        data: dict | None = None,
         require_auth: bool = False,
     ) -> dict | list:
         await self._maybe_throttle()
@@ -309,8 +309,8 @@ class RedditClient:
         subreddit: str,
         sort: str = "hot",
         limit: int = 25,
-        after: Optional[str] = None,
-    ) -> List[Post]:
+        after: str | None = None,
+    ) -> list[Post]:
         sub = clean_sub(subreddit)
         sort = sort if sort in {"hot", "new", "top", "rising", "controversial"} else "hot"
         params = {"limit": str(limit), "raw_json": "1"}
@@ -324,12 +324,12 @@ class RedditClient:
         children = data.get("data", {}).get("children", [])
         return [Post.from_json(c) for c in children if c.get("kind") == "t3"]
 
-    async def get_frontpage(self, sort: str = "hot", limit: int = 25) -> List[Post]:
+    async def get_frontpage(self, sort: str = "hot", limit: int = 25) -> list[Post]:
         return await self.get_subreddit_posts("popular", sort=sort, limit=limit)
 
     async def get_post_with_comments(
         self, permalink: str
-    ) -> tuple[Post, List[object]]:
+    ) -> tuple[Post, list[object]]:
         """Return (post, top-level items). Items are Comment or MoreComments."""
         link = permalink if permalink.startswith("/") else f"/{permalink}"
         if link.endswith("/"):
@@ -343,7 +343,7 @@ class RedditClient:
         if not post_listing:
             raise RedditError("Post not found")
         post = Post.from_json(post_listing[0])
-        items: List[object] = []
+        items: list[object] = []
         for child in data[1].get("data", {}).get("children", []):
             kind = child.get("kind")
             if kind == "t1":
@@ -357,8 +357,8 @@ class RedditClient:
         return post, items
 
     async def get_more_children(
-        self, link_fullname: str, child_ids: List[str], sort: str = "confidence"
-    ) -> List[object]:
+        self, link_fullname: str, child_ids: list[str], sort: str = "confidence"
+    ) -> list[object]:
         if not child_ids:
             return []
         params = {
@@ -373,7 +373,7 @@ class RedditClient:
         if not isinstance(data, dict):
             return []
         things = data.get("json", {}).get("data", {}).get("things", [])
-        out: List[object] = []
+        out: list[object] = []
         for child in things:
             kind = child.get("kind")
             if kind == "t1":
@@ -386,7 +386,7 @@ class RedditClient:
                     out.append(m)
         return out
 
-    async def search_subreddits(self, query: str, limit: int = 25) -> List[dict]:
+    async def search_subreddits(self, query: str, limit: int = 25) -> list[dict]:
         params = {"q": query, "limit": str(limit), "raw_json": "1"}
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}/subreddits/search{suffix}?{urllib.parse.urlencode(params)}"
@@ -398,12 +398,12 @@ class RedditClient:
 
     # ---------- authenticated-only endpoints ----------
 
-    async def get_subscribed_subreddits(self) -> List[str]:
+    async def get_subscribed_subreddits(self) -> list[str]:
         """Return list of subreddit display names the user is subscribed to."""
         if not self.authenticated:
             raise RedditError("This action requires logging in")
-        names: List[str] = []
-        after: Optional[str] = None
+        names: list[str] = []
+        after: str | None = None
         for _ in range(5):
             params = {"limit": "100", "raw_json": "1"}
             if after:
@@ -465,14 +465,14 @@ class RedditClient:
         if errs:
             raise RedditError(f"Comment failed: {errs[0]}")
 
-    async def get_inbox(self, only_unread: bool = False) -> List[InboxItem]:
+    async def get_inbox(self, only_unread: bool = False) -> list[InboxItem]:
         endpoint = "unread" if only_unread else "inbox"
         url = f"{OAUTH_BASE_URL}/message/{endpoint}?raw_json=1&limit=50"
         data = await self._req(url, require_auth=True)
         if not isinstance(data, dict):
             return []
         children = data.get("data", {}).get("children", [])
-        items: List[InboxItem] = []
+        items: list[InboxItem] = []
         for c in children:
             it = InboxItem.from_json(c)
             if it is not None:

@@ -36,7 +36,7 @@ def _cmd_login(args: argparse.Namespace) -> int:
     username = input("reddit username: ").strip()
     password = getpass.getpass("reddit password: ")
     user_agent = input(
-        f"user_agent (blank = default): "
+        "user_agent (blank = default): "
     ).strip() or auth.DEFAULT_USER_AGENT
 
     if not all([client_id, client_secret, username, password]):

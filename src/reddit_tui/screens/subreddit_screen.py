@@ -1,8 +1,6 @@
 """Subreddit posts listing screen."""
 from __future__ import annotations
 
-from typing import List, Optional
-
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -59,8 +57,8 @@ class SubredditScreen(Screen):
         self.client = client
         self.subreddit = subreddit
         self.sort = "hot"
-        self.posts: List[Post] = []
-        self.subscribed: List[str] = []
+        self.posts: list[Post] = []
+        self.subscribed: list[str] = []
         self.unread_count: int = 0
 
     def compose(self) -> ComposeResult:
@@ -86,7 +84,7 @@ class SubredditScreen(Screen):
             return "[dim]g: go to sub\n/: search\ntab: focus list\ni: inbox[/]"
         return "[dim]g: go to sub\n/: search\ntab: focus list[/]"
 
-    def _build_sidebar_items(self, subs: List[str]) -> List[ListItem]:
+    def _build_sidebar_items(self, subs: list[str]) -> list[ListItem]:
         return [ListItem(Label(f"r/{s}"), name=s) for s in subs]
 
     def _title(self) -> str:
@@ -135,7 +133,7 @@ class SubredditScreen(Screen):
         if subs:
             self._populate_sidebar(subs)
 
-    def _populate_sidebar(self, subs: List[str]) -> None:
+    def _populate_sidebar(self, subs: list[str]) -> None:
         self.subscribed = subs
         seen = {s.lower() for s in subs}
         combined = subs + [s for s in DEFAULT_SUBS if s.lower() not in seen]
@@ -246,7 +244,7 @@ class SubredditScreen(Screen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.action_open_post()
 
-    def _current_post(self) -> Optional[Post]:
+    def _current_post(self) -> Post | None:
         table = self.query_one("#posts-table", DataTable)
         row = table.cursor_row
         if row is None or not (0 <= row < len(self.posts)):
@@ -409,12 +407,12 @@ class SubredditScreen(Screen):
         except (IndexError, AttributeError):
             return
         try:
-            for col_idx, (col_key, value) in enumerate(zip(table.columns, row_data)):
+            for col_key, value in zip(table.columns, row_data, strict=False):
                 table.update_cell(row_key, col_key, value)
         except Exception:
             self._populate(self.posts)
 
-    def _populate(self, posts: List[Post]) -> None:
+    def _populate(self, posts: list[Post]) -> None:
         self.posts = posts
         table = self.query_one("#posts-table", DataTable)
         table.clear()

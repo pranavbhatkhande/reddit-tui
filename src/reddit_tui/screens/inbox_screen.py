@@ -1,8 +1,6 @@
 """Inbox screen — read replies and PMs."""
 from __future__ import annotations
 
-from typing import List
-
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -13,8 +11,8 @@ from reddit_tui.reddit_client import InboxItem, RedditClient, RedditError
 from reddit_tui.utils import escape_markup, format_age
 
 
-def _wrap(text: str, width: int = 100) -> List[str]:
-    out: List[str] = []
+def _wrap(text: str, width: int = 100) -> list[str]:
+    out: list[str] = []
     for raw in text.splitlines() or [""]:
         line = raw
         if not line:
@@ -77,8 +75,8 @@ class InboxScreen(Screen):
     def __init__(self, client: RedditClient) -> None:
         super().__init__()
         self.client = client
-        self.items: List[InboxItem] = []
-        self._widgets: List[InboxItemWidget] = []
+        self.items: list[InboxItem] = []
+        self._widgets: list[InboxItemWidget] = []
         self._focused_idx: int = -1
 
     def compose(self) -> ComposeResult:
@@ -112,7 +110,7 @@ class InboxScreen(Screen):
     def _set_status(self, msg: str) -> None:
         self.query_one("#inbox-status", Static).update(msg)
 
-    def _populate(self, items: List[InboxItem]) -> None:
+    def _populate(self, items: list[InboxItem]) -> None:
         self.items = items
         scroll = self.query_one("#inbox-scroll", VerticalScroll)
         for w in list(scroll.query(InboxItemWidget)):
@@ -157,8 +155,8 @@ class InboxScreen(Screen):
         it = self.items[self._focused_idx]
         if it.kind == "t1" and it.context:
             # Open the thread in PostScreen
-            from reddit_tui.screens.post_screen import PostScreen
             from reddit_tui.reddit_client import Post
+            from reddit_tui.screens.post_screen import PostScreen
             # Build a stub Post; PostScreen's _fetch_comments will fill in details
             stub = Post(
                 id="",

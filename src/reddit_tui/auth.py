@@ -21,7 +21,6 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
@@ -41,7 +40,7 @@ KEYRING_SERVICE = "reddit-tui"
 KEYRING_FIELDS = ("client_id", "client_secret", "username", "password", "user_agent")
 
 _REFRESH_LOCK = asyncio.Lock()
-_CACHED_TOKEN: Optional["TokenStore"] = None
+_CACHED_TOKEN: TokenStore | None = None
 
 
 class AuthError(Exception):
@@ -64,7 +63,7 @@ class TokenStore:
     username: str
 
 
-def _try_keyring() -> Optional[AuthConfig]:
+def _try_keyring() -> AuthConfig | None:
     """Return AuthConfig from system keyring if all required fields present."""
     try:
         import keyring  # type: ignore
@@ -110,7 +109,7 @@ def delete_from_keyring() -> None:
             pass
 
 
-def load_config() -> Optional[AuthConfig]:
+def load_config() -> AuthConfig | None:
     """Return the user's auth config, or None if not configured.
 
     Resolution order: keyring → ``~/.config/reddit-tui/config.json``.
@@ -139,7 +138,7 @@ def load_config() -> Optional[AuthConfig]:
     )
 
 
-def load_token() -> Optional[TokenStore]:
+def load_token() -> TokenStore | None:
     if not TOKEN_PATH.exists():
         return None
     try:
@@ -167,7 +166,7 @@ def save_token(token: TokenStore) -> None:
 async def fetch_token(config: AuthConfig) -> TokenStore:
     """Exchange username+password for a bearer token via the script app flow."""
     basic = base64.b64encode(
-        f"{config.client_id}:{config.client_secret}".encode("utf-8")
+        f"{config.client_id}:{config.client_secret}".encode()
     ).decode("ascii")
     headers = {
         "User-Agent": config.user_agent,
@@ -201,7 +200,7 @@ async def fetch_token(config: AuthConfig) -> TokenStore:
     )
 
 
-def _is_fresh(token: Optional[TokenStore], username: str) -> bool:
+def _is_fresh(token: TokenStore | None, username: str) -> bool:
     return (
         token is not None
         and token.username == username
