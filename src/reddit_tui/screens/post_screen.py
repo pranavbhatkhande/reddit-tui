@@ -267,11 +267,6 @@ class PostScreen(Screen):
         self._flat_comments = self._flatten(comments)
 
         scroll = self.query_one("#post-scroll", VerticalScroll)
-        # Remove the placeholder body widget if present
-        try:
-            self.query_one("#comments-body", Static).remove()
-        except Exception:
-            pass
         # Remove any existing CommentWidgets (in case of refresh)
         for w in list(scroll.query(CommentWidget)):
             w.remove()
@@ -280,16 +275,22 @@ class PostScreen(Screen):
             self._comments_header_loaded(len(self._flat_comments))
         )
 
+        body_placeholder = self.query_one("#comments-body", Static)
         if not self._flat_comments:
-            scroll.mount(Static("[#6c7080 italic](no comments yet)[/]", id="comments-body"))
+            body_placeholder.update("[#6c7080 italic](no comments yet)[/]")
+            self._comment_widgets = []
+            self._focused_idx = -1
+            self._refresh_post_card()
             return
+
+        # Hide the placeholder by setting it empty (a single space avoids None-renderable issues)
+        body_placeholder.update(" ")
 
         self._comment_widgets = []
         for c in self._flat_comments:
             w = CommentWidget(c, op_author=self.post.author)
             self._comment_widgets.append(w)
             scroll.mount(w)
-        # Keep focus on post initially
         self._focused_idx = -1
         self._refresh_post_card()
 
