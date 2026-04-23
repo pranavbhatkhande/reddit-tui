@@ -161,6 +161,31 @@ reddit-tui/
         └── input_dialog.py
 ```
 
+## Troubleshooting
+
+### HTTP 403 from Reddit
+
+Reddit's anonymous JSON API occasionally returns **HTTP 403** for requests
+whose User-Agent looks generic or is shared across many clients.  The app
+already tries `old.reddit.com` automatically as a fallback, but if you still
+see 403 errors there are two remedies:
+
+1. **Log in** (see [Logging in](#logging-in-optional) above).  Authenticated
+   traffic goes through `oauth.reddit.com` which has much higher rate limits
+   and is unaffected by the anonymous-UA restrictions.
+
+2. **Set a custom User-Agent** via the `REDDIT_TUI_USER_AGENT` environment
+   variable:
+
+   ```bash
+   export REDDIT_TUI_USER_AGENT="my-personal-reddit-tui/1.0 (u/YourUsername)"
+   ./reddit-tui
+   ```
+
+   Reddit's [API rules](https://github.com/reddit-archive/reddit/wiki/API)
+   require a unique, descriptive User-Agent string that identifies your
+   client. Using your Reddit username is the recommended format.
+
 ## Notes
 
 - This client uses Reddit's public JSON endpoints (e.g. `https://www.reddit.com/r/<sub>/hot.json`) when not logged in. When logged in via the script-app OAuth flow, it uses `https://oauth.reddit.com` with a bearer token.

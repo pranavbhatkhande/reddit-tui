@@ -12,6 +12,10 @@ manually.
 from __future__ import annotations
 
 import asyncio
+import getpass
+import hashlib
+import os
+import platform
 import time
 import urllib.parse
 from collections.abc import Awaitable, Callable
@@ -19,10 +23,36 @@ from dataclasses import dataclass, field
 
 import httpx
 
-DEFAULT_USER_AGENT = (
-    "reddit-tui/0.3.0 (terminal browser; +https://github.com/anomalyco/reddit-tui)"
-)
+
+def _build_default_user_agent() -> str:
+    """Build a unique, descriptive User-Agent string per Reddit API guidelines.
+
+    The UA includes the package version (from ``reddit_tui.__version__`` when
+    available), a stable per-machine suffix derived from the hostname and
+    username, and the correct repo URL.  The ``REDDIT_TUI_USER_AGENT``
+    environment variable overrides everything.
+    """
+    env_ua = os.environ.get("REDDIT_TUI_USER_AGENT", "").strip()
+    if env_ua:
+        return env_ua
+
+    try:
+        from reddit_tui import __version__ as _ver  # type: ignore[import-not-found]
+    except (ImportError, AttributeError):
+        _ver = "0.3.0"
+
+    # Stable per-install suffix: first 8 hex chars of SHA-256(hostname+username).
+    machine_key = platform.node() + getpass.getuser()
+    suffix = hashlib.sha256(machine_key.encode()).hexdigest()[:8]
+    return (
+        f"reddit-tui/{_ver} (terminal browser; "
+        f"+https://github.com/pranavbhatkhande/reddit-tui; {suffix})"
+    )
+
+
+DEFAULT_USER_AGENT = _build_default_user_agent()
 PUBLIC_BASE_URL = "https://www.reddit.com"
+OLD_REDDIT_BASE_URL = "https://old.reddit.com"
 OAUTH_BASE_URL = "https://oauth.reddit.com"
 TIMEOUT = 15.0
 
@@ -293,6 +323,41 @@ class RedditClient:
             raise RedditError("Authentication expired or invalid")
         if resp.status_code == 429:
             raise RedditError("Rate limited by Reddit (HTTP 429)")
+        if resp.status_code == 403:
+            # For anonymous GETs targeting www.reddit.com, retry once against
+            # old.reddit.com which is more permissive for unauthenticated reads.
+            is_anonymous_get = (
+                not headers.get("Authorization")
+                and method.upper() == "GET"
+                and url.startswith(PUBLIC_BASE_URL)
+            )
+            if is_anonymous_get:
+                fallback_url = url.replace(PUBLIC_BASE_URL, OLD_REDDIT_BASE_URL, 1)
+                try:
+                    fb_resp = await self._client.request(
+                        method, fallback_url, headers=headers, data=data
+                    )
+                except httpx.TimeoutException as e:
+                    raise RedditError("Request timed out") from e
+                except httpx.HTTPError as e:
+                    raise RedditError(f"Network error: {e}") from e
+                self._record_rate_limit(fb_resp)
+                if fb_resp.status_code < 400:
+                    if not fb_resp.content:
+                        return {}
+                    try:
+                        return fb_resp.json()
+                    except ValueError as e:
+                        raise RedditError("Invalid JSON from Reddit") from e
+            # Both hosts failed (or non-anonymous/non-GET) — surface a helpful message.
+            if not headers.get("Authorization"):
+                raise RedditError(
+                    "HTTP 403 from Reddit (anonymous). Try logging in (see README)"
+                    " or set REDDIT_TUI_USER_AGENT to a unique value."
+                )
+            raise RedditError(
+                "HTTP 403 from Reddit — insufficient permissions or private subreddit."
+            )
         if resp.status_code >= 400:
             raise RedditError(f"HTTP {resp.status_code} fetching {url}")
         if not resp.content:
