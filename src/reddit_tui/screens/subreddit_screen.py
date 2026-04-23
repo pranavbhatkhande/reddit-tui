@@ -10,7 +10,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, ListItem, ListView, Static
 
-from reddit_tui.reddit_client import Post, RedditClient, RedditError
+from reddit_tui.reddit_client import Post, RedditClient, RedditError, clean_sub
 from reddit_tui.utils import escape_markup, format_age, format_score
 
 DEFAULT_SUBS = [
@@ -198,8 +198,7 @@ class SubredditScreen(Screen):
 
         def _cb(value: str | None) -> None:
             if value:
-                name = value.strip().lstrip("/").removeprefix("r/") or "popular"
-                self._switch_subreddit(name)
+                self._switch_subreddit(clean_sub(value))
 
         self.app.push_screen(InputDialog("Go to subreddit (without r/):"), _cb)
 

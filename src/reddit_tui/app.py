@@ -1,6 +1,7 @@
 """Main Textual application."""
 from __future__ import annotations
 
+from textual import work
 from textual.app import App
 from textual.binding import Binding
 
@@ -197,23 +198,46 @@ class RedditTUI(App):
         except auth_mod.AuthError as e:
             self.auth_status = f"auth config error: {e}"
 
+        # Build a client up-front. If auth is configured, the token provider
+        # will lazily fetch (and refresh) on first use, off the UI thread.
         if self.auth_config is not None:
-            try:
-                # Validate/refresh token now so failures surface at startup
-                auth_mod.get_valid_token(self.auth_config)
+            cfg = self.auth_config
 
-                def _provider() -> str:
-                    return auth_mod.get_valid_token(self.auth_config).access_token
+            def _provider() -> str:
+                return auth_mod.get_valid_token(cfg).access_token
 
-                self.client = RedditClient(
-                    token_provider=_provider, username=self.auth_config.username
-                )
-                self.SUB_TITLE = f"logged in as u/{self.auth_config.username}"
-            except auth_mod.AuthError as e:
-                self.auth_status = f"login failed: {e}"
-                self.client = RedditClient()
+            self.client = RedditClient(
+                token_provider=_provider,
+                username=cfg.username,
+                user_agent=cfg.user_agent,
+            )
+            self.SUB_TITLE = f"u/{cfg.username} (signing in…)"
         else:
             self.client = RedditClient()
 
     def on_mount(self) -> None:
         self.push_screen(SubredditScreen(self.client, subreddit="popular"))
+        if self.auth_config is not None:
+            self._verify_login()
+
+    @work(exclusive=True, thread=True, group="auth")
+    def _verify_login(self) -> None:
+        cfg = self.auth_config
+        if cfg is None:
+            return
+        try:
+            auth_mod.get_valid_token(cfg)
+        except auth_mod.AuthError as e:
+            self.call_from_thread(self._on_login_failed, str(e))
+            return
+        self.call_from_thread(self._on_login_ok, cfg.username)
+
+    def _on_login_ok(self, username: str) -> None:
+        self.SUB_TITLE = f"logged in as u/{username}"
+        self.auth_status = ""
+
+    def _on_login_failed(self, err: str) -> None:
+        self.SUB_TITLE = "logged out (auth failed)"
+        self.auth_status = f"login failed: {err}"
+        # Drop credentials so subsequent calls don't keep retrying.
+        self.client = RedditClient(user_agent=self.client.user_agent)

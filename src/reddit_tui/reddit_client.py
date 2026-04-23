@@ -14,10 +14,25 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-USER_AGENT = "reddit-tui/0.2.0 (terminal browser; +https://github.com/local/reddit-tui)"
+DEFAULT_USER_AGENT = (
+    "reddit-tui/0.3.0 (terminal browser; +https://github.com/anomalyco/reddit-tui)"
+)
 PUBLIC_BASE_URL = "https://www.reddit.com"
 OAUTH_BASE_URL = "https://oauth.reddit.com"
 TIMEOUT = 15
+
+
+def clean_sub(name: str) -> str:
+    """Normalize a user-supplied subreddit name.
+
+    Strips leading/trailing slashes, an optional ``r/`` prefix, and whitespace.
+    Returns ``"all"`` for empty input.
+    """
+    s = (name or "").strip().strip("/").strip()
+    if s.lower().startswith("r/"):
+        s = s[2:]
+    s = s.strip("/").strip()
+    return s or "all"
 
 
 class RedditError(Exception):
@@ -144,8 +159,9 @@ def _request(
     token: Optional[str] = None,
     method: str = "GET",
     data: Optional[bytes] = None,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> dict:
-    headers = {"User-Agent": USER_AGENT}
+    headers = {"User-Agent": user_agent}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if data is not None:
@@ -175,9 +191,11 @@ class RedditClient:
         self,
         token_provider: Optional[Callable[[], str]] = None,
         username: Optional[str] = None,
+        user_agent: Optional[str] = None,
     ) -> None:
         self._token_provider = token_provider
         self.username = username
+        self.user_agent = user_agent or DEFAULT_USER_AGENT
 
     @property
     def authenticated(self) -> bool:
@@ -187,6 +205,23 @@ class RedditClient:
         if self._token_provider is None:
             return None
         return self._token_provider()
+
+    def _req(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: Optional[bytes] = None,
+        require_auth: bool = False,
+    ) -> dict:
+        token = self._require_auth() if require_auth else self._token()
+        return _request(
+            url,
+            token=token,
+            method=method,
+            data=data,
+            user_agent=self.user_agent,
+        )
 
     def _base(self) -> str:
         return OAUTH_BASE_URL if self.authenticated else PUBLIC_BASE_URL
@@ -200,16 +235,14 @@ class RedditClient:
         limit: int = 25,
         after: Optional[str] = None,
     ) -> List[Post]:
-        sub = subreddit.strip().lstrip("/").removeprefix("r/")
-        if not sub:
-            sub = "all"
+        sub = clean_sub(subreddit)
         sort = sort if sort in {"hot", "new", "top", "rising", "controversial"} else "hot"
         params = {"limit": str(limit), "raw_json": "1"}
         if after:
             params["after"] = after
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}/r/{urllib.parse.quote(sub)}/{sort}{suffix}?{urllib.parse.urlencode(params)}"
-        data = _request(url, token=self._token())
+        data = self._req(url)
         children = data.get("data", {}).get("children", [])
         return [Post.from_json(c) for c in children if c.get("kind") == "t3"]
 
@@ -222,7 +255,7 @@ class RedditClient:
             link = link[:-1]
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}{link}{suffix}?raw_json=1&limit=200"
-        data = _request(url, token=self._token())
+        data = self._req(url)
         if not isinstance(data, list) or len(data) < 2:
             raise RedditError("Unexpected response shape for post")
         post_listing = data[0].get("data", {}).get("children", [])
@@ -240,7 +273,7 @@ class RedditClient:
         params = {"q": query, "limit": str(limit), "raw_json": "1"}
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}/subreddits/search{suffix}?{urllib.parse.urlencode(params)}"
-        data = _request(url, token=self._token())
+        data = self._req(url)
         children = data.get("data", {}).get("children", [])
         return [c.get("data", {}) for c in children]
 
@@ -254,7 +287,7 @@ class RedditClient:
 
     def get_subscribed_subreddits(self) -> List[str]:
         """Return list of subreddit display names the user is subscribed to."""
-        token = self._require_auth()
+        self._require_auth()
         names: List[str] = []
         after: Optional[str] = None
         # Paginate up to ~500 subscriptions
@@ -263,7 +296,7 @@ class RedditClient:
             if after:
                 params["after"] = after
             url = f"{OAUTH_BASE_URL}/subreddits/mine/subscriber?{urllib.parse.urlencode(params)}"
-            data = _request(url, token=token)
+            data = self._req(url, require_auth=True)
             children = data.get("data", {}).get("children", [])
             for c in children:
                 d = c.get("data", {})
@@ -277,29 +310,25 @@ class RedditClient:
 
     def vote(self, fullname: str, direction: int) -> None:
         """direction: 1=upvote, 0=clear, -1=downvote."""
-        token = self._require_auth()
         if direction not in (-1, 0, 1):
             raise RedditError(f"Invalid vote direction: {direction}")
         body = urllib.parse.urlencode({"id": fullname, "dir": str(direction)}).encode("utf-8")
-        _request(f"{OAUTH_BASE_URL}/api/vote", token=token, method="POST", data=body)
+        self._req(f"{OAUTH_BASE_URL}/api/vote", method="POST", data=body, require_auth=True)
 
     def save(self, fullname: str) -> None:
-        token = self._require_auth()
         body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        _request(f"{OAUTH_BASE_URL}/api/save", token=token, method="POST", data=body)
+        self._req(f"{OAUTH_BASE_URL}/api/save", method="POST", data=body, require_auth=True)
 
     def unsave(self, fullname: str) -> None:
-        token = self._require_auth()
         body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        _request(f"{OAUTH_BASE_URL}/api/unsave", token=token, method="POST", data=body)
+        self._req(f"{OAUTH_BASE_URL}/api/unsave", method="POST", data=body, require_auth=True)
 
     def submit_comment(self, parent_fullname: str, text: str) -> None:
-        token = self._require_auth()
         body = urllib.parse.urlencode(
             {"thing_id": parent_fullname, "text": text, "api_type": "json"}
         ).encode("utf-8")
-        resp = _request(
-            f"{OAUTH_BASE_URL}/api/comment", token=token, method="POST", data=body
+        resp = self._req(
+            f"{OAUTH_BASE_URL}/api/comment", method="POST", data=body, require_auth=True
         )
         # Reddit returns errors inside json.errors
         errs = resp.get("json", {}).get("errors", [])
@@ -307,10 +336,9 @@ class RedditClient:
             raise RedditError(f"Comment failed: {errs[0]}")
 
     def get_inbox(self, only_unread: bool = False) -> List[InboxItem]:
-        token = self._require_auth()
         endpoint = "unread" if only_unread else "inbox"
         url = f"{OAUTH_BASE_URL}/message/{endpoint}?raw_json=1&limit=50"
-        data = _request(url, token=token)
+        data = self._req(url, require_auth=True)
         children = data.get("data", {}).get("children", [])
         items: List[InboxItem] = []
         for c in children:
@@ -323,13 +351,16 @@ class RedditClient:
         if not self.authenticated:
             return 0
         try:
-            return len(self.get_inbox(only_unread=True))
+            data = self._req(f"{OAUTH_BASE_URL}/api/v1/me", require_auth=True)
         except RedditError:
+            return 0
+        try:
+            return int(data.get("inbox_count", 0) or 0)
+        except (TypeError, ValueError):
             return 0
 
     def mark_read(self, fullname: str) -> None:
-        token = self._require_auth()
         body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        _request(
-            f"{OAUTH_BASE_URL}/api/read_message", token=token, method="POST", data=body
+        self._req(
+            f"{OAUTH_BASE_URL}/api/read_message", method="POST", data=body, require_auth=True
         )
