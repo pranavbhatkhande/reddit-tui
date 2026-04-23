@@ -31,23 +31,6 @@ def _wrap(text: str, width: int = 100) -> List[str]:
 
 
 class InboxItemWidget(Static):
-    DEFAULT_CSS = """
-    InboxItemWidget {
-        padding: 1 2;
-        height: auto;
-        background: #161922;
-        border-left: thick #2a2f3d;
-        margin-bottom: 1;
-    }
-    InboxItemWidget.-unread {
-        border-left: thick #ff4500;
-        background: #1a1d27;
-    }
-    InboxItemWidget.-focused {
-        background: #2a2f3d;
-    }
-    """
-
     def __init__(self, item: InboxItem) -> None:
         self.item = item
         super().__init__(self._build())
@@ -89,25 +72,7 @@ class InboxScreen(Screen):
         Binding("m", "mark_read", "Mark read"),
     ]
 
-    DEFAULT_CSS = """
-    #inbox-scroll {
-        padding: 1 2;
-        background: #0f1117;
-    }
-    #inbox-title {
-        background: #1a1d27;
-        color: #e8eaf0;
-        padding: 1 2;
-        border-bottom: hkey #2a2f3d;
-    }
-    #inbox-status {
-        background: #1a1d27;
-        color: #8a90a3;
-        padding: 0 2;
-        border-top: hkey #2a2f3d;
-        height: 1;
-    }
-    """
+    DEFAULT_CSS = ""
 
     def __init__(self, client: RedditClient) -> None:
         super().__init__()

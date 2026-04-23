@@ -13,35 +13,6 @@ from textual.widgets import Static, TextArea
 
 
 class ReplyDialog(ModalScreen[str | None]):
-    DEFAULT_CSS = """
-    ReplyDialog {
-        align: center middle;
-    }
-    #reply-box {
-        width: 80%;
-        max-width: 100;
-        height: auto;
-        max-height: 80%;
-        background: #161922;
-        border: round #ff4500;
-        padding: 1 2;
-    }
-    #reply-prompt {
-        color: #f1fa8c;
-        padding-bottom: 1;
-    }
-    #reply-area {
-        height: 12;
-        min-height: 6;
-        background: #0f1117;
-        border: round #2a2f3d;
-    }
-    #reply-hint {
-        color: #6c7080;
-        padding-top: 1;
-    }
-    """
-
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "submit", "Submit", show=True),
