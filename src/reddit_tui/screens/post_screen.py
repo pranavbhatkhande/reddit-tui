@@ -488,7 +488,7 @@ class PostScreen(Screen):
         self._open_reply_dialog(c.name, f"reply to u/{c.author}")
 
     def _open_reply_dialog(self, parent_fullname: str, prompt: str) -> None:
-        from reddit_tui.screens.input_dialog import InputDialog
+        from reddit_tui.screens.reply_dialog import ReplyDialog
 
         def _cb(value: str | None) -> None:
             if value and value.strip():
@@ -496,7 +496,7 @@ class PostScreen(Screen):
                     self._send_reply(parent_fullname, value.strip()), group="reply"
                 )
 
-        self.app.push_screen(InputDialog(prompt), _cb)
+        self.app.push_screen(ReplyDialog(prompt), _cb)
 
     async def _send_reply(self, parent_fullname: str, text: str) -> None:
         try:
