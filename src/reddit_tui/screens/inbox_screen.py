@@ -1,9 +1,6 @@
 """Inbox screen — read replies and PMs."""
 from __future__ import annotations
 
-from typing import List
-
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -14,8 +11,8 @@ from reddit_tui.reddit_client import InboxItem, RedditClient, RedditError
 from reddit_tui.utils import escape_markup, format_age
 
 
-def _wrap(text: str, width: int = 100) -> List[str]:
-    out: List[str] = []
+def _wrap(text: str, width: int = 100) -> list[str]:
+    out: list[str] = []
     for raw in text.splitlines() or [""]:
         line = raw
         if not line:
@@ -32,23 +29,6 @@ def _wrap(text: str, width: int = 100) -> List[str]:
 
 
 class InboxItemWidget(Static):
-    DEFAULT_CSS = """
-    InboxItemWidget {
-        padding: 1 2;
-        height: auto;
-        background: #161922;
-        border-left: thick #2a2f3d;
-        margin-bottom: 1;
-    }
-    InboxItemWidget.-unread {
-        border-left: thick #ff4500;
-        background: #1a1d27;
-    }
-    InboxItemWidget.-focused {
-        background: #2a2f3d;
-    }
-    """
-
     def __init__(self, item: InboxItem) -> None:
         self.item = item
         super().__init__(self._build())
@@ -90,31 +70,13 @@ class InboxScreen(Screen):
         Binding("m", "mark_read", "Mark read"),
     ]
 
-    DEFAULT_CSS = """
-    #inbox-scroll {
-        padding: 1 2;
-        background: #0f1117;
-    }
-    #inbox-title {
-        background: #1a1d27;
-        color: #e8eaf0;
-        padding: 1 2;
-        border-bottom: hkey #2a2f3d;
-    }
-    #inbox-status {
-        background: #1a1d27;
-        color: #8a90a3;
-        padding: 0 2;
-        border-top: hkey #2a2f3d;
-        height: 1;
-    }
-    """
+    DEFAULT_CSS = ""
 
     def __init__(self, client: RedditClient) -> None:
         super().__init__()
         self.client = client
-        self.items: List[InboxItem] = []
-        self._widgets: List[InboxItemWidget] = []
+        self.items: list[InboxItem] = []
+        self._widgets: list[InboxItemWidget] = []
         self._focused_idx: int = -1
 
     def compose(self) -> ComposeResult:
@@ -134,19 +96,21 @@ class InboxScreen(Screen):
     def action_refresh(self) -> None:
         self._fetch()
 
-    @work(exclusive=True, thread=True)
     def _fetch(self) -> None:
+        self.run_worker(self._do_fetch(), exclusive=True)
+
+    async def _do_fetch(self) -> None:
         try:
-            items = self.client.get_inbox(only_unread=False)
+            items = await self.client.get_inbox(only_unread=False)
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._populate, items)
+        self._populate(items)
 
     def _set_status(self, msg: str) -> None:
         self.query_one("#inbox-status", Static).update(msg)
 
-    def _populate(self, items: List[InboxItem]) -> None:
+    def _populate(self, items: list[InboxItem]) -> None:
         self.items = items
         scroll = self.query_one("#inbox-scroll", VerticalScroll)
         for w in list(scroll.query(InboxItemWidget)):
@@ -191,8 +155,8 @@ class InboxScreen(Screen):
         it = self.items[self._focused_idx]
         if it.kind == "t1" and it.context:
             # Open the thread in PostScreen
-            from reddit_tui.screens.post_screen import PostScreen
             from reddit_tui.reddit_client import Post
+            from reddit_tui.screens.post_screen import PostScreen
             # Build a stub Post; PostScreen's _fetch_comments will fill in details
             stub = Post(
                 id="",
@@ -222,14 +186,16 @@ class InboxScreen(Screen):
             return
         self._send_mark_read(it.name, self._focused_idx)
 
-    @work(exclusive=False, thread=True, group="markread")
     def _send_mark_read(self, fullname: str, idx: int) -> None:
+        self.run_worker(self._do_mark_read(fullname, idx), group="markread")
+
+    async def _do_mark_read(self, fullname: str, idx: int) -> None:
         try:
-            self.client.mark_read(fullname)
+            await self.client.mark_read(fullname)
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._on_marked, idx)
+        self._on_marked(idx)
 
     def _on_marked(self, idx: int) -> None:
         if 0 <= idx < len(self.items):

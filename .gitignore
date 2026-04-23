@@ -12,3 +12,6 @@ dist/
 *.log
 .cache/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+feedback-from-gemini.md
