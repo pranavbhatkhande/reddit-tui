@@ -92,7 +92,7 @@ class Comment:
     depth: int = 0
     likes: Optional[bool] = None
     saved: bool = False
-    replies: List["Comment"] = field(default_factory=list)
+    replies: List[object] = field(default_factory=list)  # List[Comment | MoreComments]
 
     @classmethod
     def from_json(cls, data: dict, depth: int = 0) -> Optional["Comment"]:
@@ -100,12 +100,18 @@ class Comment:
             return None
         d = data.get("data", {})
         replies_data = d.get("replies")
-        replies: List[Comment] = []
+        replies: List[object] = []
         if isinstance(replies_data, dict):
             for child in replies_data.get("data", {}).get("children", []):
-                c = cls.from_json(child, depth=depth + 1)
-                if c is not None:
-                    replies.append(c)
+                kind = child.get("kind")
+                if kind == "t1":
+                    c = cls.from_json(child, depth=depth + 1)
+                    if c is not None:
+                        replies.append(c)
+                elif kind == "more":
+                    m = MoreComments.from_json(child, depth=depth + 1)
+                    if m is not None:
+                        replies.append(m)
         return cls(
             id=d.get("id", ""),
             name=d.get("name", ""),
@@ -117,6 +123,32 @@ class Comment:
             likes=d.get("likes"),
             saved=bool(d.get("saved", False)),
             replies=replies,
+        )
+
+
+@dataclass
+class MoreComments:
+    """Represents a 't1 kind=more' placeholder pointing at unloaded children."""
+
+    id: str
+    name: str  # fullname (often "t1_..." or empty for "continue this thread")
+    parent_id: str
+    count: int
+    depth: int
+    children: List[str] = field(default_factory=list)  # child comment ids
+
+    @classmethod
+    def from_json(cls, data: dict, depth: int = 0) -> Optional["MoreComments"]:
+        if data.get("kind") != "more":
+            return None
+        d = data.get("data", {})
+        return cls(
+            id=d.get("id", ""),
+            name=d.get("name", "") or "",
+            parent_id=d.get("parent_id", "") or "",
+            count=int(d.get("count", 0) or 0),
+            depth=depth,
+            children=list(d.get("children", []) or []),
         )
 
 
@@ -249,7 +281,10 @@ class RedditClient:
     def get_frontpage(self, sort: str = "hot", limit: int = 25) -> List[Post]:
         return self.get_subreddit_posts("popular", sort=sort, limit=limit)
 
-    def get_post_with_comments(self, permalink: str) -> tuple[Post, List[Comment]]:
+    def get_post_with_comments(
+        self, permalink: str
+    ) -> tuple[Post, List[object]]:
+        """Return (post, top-level items). Items are Comment or MoreComments."""
         link = permalink if permalink.startswith("/") else f"/{permalink}"
         if link.endswith("/"):
             link = link[:-1]
@@ -262,12 +297,54 @@ class RedditClient:
         if not post_listing:
             raise RedditError("Post not found")
         post = Post.from_json(post_listing[0])
-        comments: List[Comment] = []
+        items: List[object] = []
         for child in data[1].get("data", {}).get("children", []):
-            c = Comment.from_json(child, depth=0)
-            if c is not None:
-                comments.append(c)
-        return post, comments
+            kind = child.get("kind")
+            if kind == "t1":
+                c = Comment.from_json(child, depth=0)
+                if c is not None:
+                    items.append(c)
+            elif kind == "more":
+                m = MoreComments.from_json(child, depth=0)
+                if m is not None:
+                    items.append(m)
+        return post, items
+
+    def get_more_children(
+        self, link_fullname: str, child_ids: List[str], sort: str = "confidence"
+    ) -> List[object]:
+        """Expand a 'more' placeholder. Returns flat list of Comment/MoreComments
+        in pre-order; parent linkage is preserved by the comments' parent_id but
+        the caller is responsible for re-threading them under their parents.
+        """
+        if not child_ids:
+            return []
+        params = {
+            "api_type": "json",
+            "link_id": link_fullname,
+            "children": ",".join(child_ids[:100]),
+            "sort": sort,
+            "raw_json": "1",
+        }
+        url = f"{self._base()}/api/morechildren?{urllib.parse.urlencode(params)}"
+        data = self._req(url)
+        things = (
+            data.get("json", {}).get("data", {}).get("things", [])
+            if isinstance(data, dict)
+            else []
+        )
+        out: List[object] = []
+        for child in things:
+            kind = child.get("kind")
+            if kind == "t1":
+                c = Comment.from_json(child, depth=0)
+                if c is not None:
+                    out.append(c)
+            elif kind == "more":
+                m = MoreComments.from_json(child, depth=0)
+                if m is not None:
+                    out.append(m)
+        return out
 
     def search_subreddits(self, query: str, limit: int = 25) -> List[dict]:
         params = {"q": query, "limit": str(limit), "raw_json": "1"}
