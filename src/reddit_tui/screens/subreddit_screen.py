@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -113,9 +112,8 @@ class SubredditScreen(Screen):
         self.query_one("#posts-table", DataTable).focus()
         self.load_posts()
         if self.client.authenticated:
-            self._load_subscriptions()
-            self._load_unread()
-        # Surface auth status if app has one
+            self.run_worker(self._load_subscriptions(), exclusive=True, group="subs")
+            self.run_worker(self._load_unread(), exclusive=True, group="inbox")
         if getattr(self.app, "auth_status", ""):
             self._set_status(f"[#ff5555]✗ {escape_markup(self.app.auth_status)}[/]")
 
@@ -129,18 +127,16 @@ class SubredditScreen(Screen):
                 lv.index = i
                 break
 
-    @work(exclusive=True, thread=True, group="subs")
-    def _load_subscriptions(self) -> None:
+    async def _load_subscriptions(self) -> None:
         try:
-            subs = self.client.get_subscribed_subreddits()
+            subs = await self.client.get_subscribed_subreddits()
         except RedditError:
             return
         if subs:
-            self.app.call_from_thread(self._populate_sidebar, subs)
+            self._populate_sidebar(subs)
 
     def _populate_sidebar(self, subs: List[str]) -> None:
         self.subscribed = subs
-        # Combine: subscribed first, then defaults that aren't already in subs
         seen = {s.lower() for s in subs}
         combined = subs + [s for s in DEFAULT_SUBS if s.lower() not in seen]
         try:
@@ -155,13 +151,12 @@ class SubredditScreen(Screen):
         )
         self._highlight_sidebar()
 
-    @work(exclusive=True, thread=True, group="inbox")
-    def _load_unread(self) -> None:
+    async def _load_unread(self) -> None:
         try:
-            n = self.client.get_unread_count()
+            n = await self.client.get_unread_count()
         except RedditError:
             return
-        self.app.call_from_thread(self._set_unread, n)
+        self._set_unread(n)
 
     def _set_unread(self, n: int) -> None:
         self.unread_count = n
@@ -185,7 +180,7 @@ class SubredditScreen(Screen):
     def action_refresh(self) -> None:
         self.load_posts()
         if self.client.authenticated:
-            self._load_unread()
+            self.run_worker(self._load_unread(), exclusive=True, group="inbox")
 
     def action_cycle_sort(self) -> None:
         idx = self.SORTS.index(self.sort) if self.sort in self.SORTS else 0
@@ -207,7 +202,7 @@ class SubredditScreen(Screen):
 
         def _cb(value: str | None) -> None:
             if value:
-                self._do_search(value.strip())
+                self.run_worker(self._do_search(value.strip()), exclusive=True)
 
         self.app.push_screen(InputDialog("Search subreddits:"), _cb)
 
@@ -218,22 +213,20 @@ class SubredditScreen(Screen):
         from reddit_tui.screens.inbox_screen import InboxScreen
         self.app.push_screen(InboxScreen(self.client))
 
-    @work(exclusive=True, thread=True)
-    def _do_search(self, query: str) -> None:
+    async def _do_search(self, query: str) -> None:
         try:
-            results = self.client.search_subreddits(query, limit=25)
+            results = await self.client.search_subreddits(query, limit=25)
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
         if not results:
-            self.app.call_from_thread(self._set_status, "[yellow]⚠ no subreddits found[/]")
+            self._set_status("[yellow]⚠ no subreddits found[/]")
             return
         first = results[0].get("display_name", query)
-        self.app.call_from_thread(
-            self._set_status,
-            f"[#50fa7b]✓ found {len(results)} subs · opening r/{escape_markup(first)}[/]",
+        self._set_status(
+            f"[#50fa7b]✓ found {len(results)} subs · opening r/{escape_markup(first)}[/]"
         )
-        self.app.call_from_thread(self._switch_subreddit, first)
+        self._switch_subreddit(first)
 
     def _switch_subreddit(self, name: str) -> None:
         self.subreddit = name
@@ -273,36 +266,36 @@ class SubredditScreen(Screen):
         post = self._current_post()
         if post is None:
             return
-        # Toggle: if already voted same direction, clear
         if (direction == 1 and post.likes is True) or (direction == -1 and post.likes is False):
             new_dir = 0
         else:
             new_dir = direction
-        # Optimistic update
         old_likes = post.likes
         old_score = post.score
         if new_dir == 1:
-            post.score += (1 if old_likes is None else (2 if old_likes is False else 0))
+            post.score += 1 if old_likes is None else (2 if old_likes is False else 0)
             post.likes = True
         elif new_dir == -1:
-            post.score += (-1 if old_likes is None else (-2 if old_likes is True else 0))
+            post.score += -1 if old_likes is None else (-2 if old_likes is True else 0)
             post.likes = False
         else:
-            post.score += (-1 if old_likes is True else (1 if old_likes is False else 0))
+            post.score += -1 if old_likes is True else (1 if old_likes is False else 0)
             post.likes = None
         self._refresh_row(post)
-        self._send_vote(post.name, new_dir, old_likes, old_score)
+        self.run_worker(
+            self._send_vote(post.name, new_dir, old_likes, old_score), group="vote"
+        )
 
-    @work(exclusive=False, thread=True, group="vote")
-    def _send_vote(self, fullname: str, direction: int, old_likes, old_score: int) -> None:
+    async def _send_vote(
+        self, fullname: str, direction: int, old_likes, old_score: int
+    ) -> None:
         try:
-            self.client.vote(fullname, direction)
+            await self.client.vote(fullname, direction)
         except RedditError as e:
-            # Revert
-            self.app.call_from_thread(self._revert_vote, fullname, old_likes, old_score, str(e))
+            self._revert_vote(fullname, old_likes, old_score, str(e))
             return
         label = {1: "upvoted", -1: "downvoted", 0: "vote cleared"}.get(direction, "voted")
-        self.app.call_from_thread(self._set_status, f"[#50fa7b]✓ {label}[/]")
+        self._set_status(f"[#50fa7b]✓ {label}[/]")
 
     def _revert_vote(self, fullname: str, old_likes, old_score: int, err: str) -> None:
         for p in self.posts:
@@ -323,22 +316,18 @@ class SubredditScreen(Screen):
         target = not post.saved
         post.saved = target
         self._refresh_row(post)
-        self._send_save(post.name, target)
+        self.run_worker(self._send_save(post.name, target), group="save")
 
-    @work(exclusive=False, thread=True, group="save")
-    def _send_save(self, fullname: str, save: bool) -> None:
+    async def _send_save(self, fullname: str, save: bool) -> None:
         try:
             if save:
-                self.client.save(fullname)
+                await self.client.save(fullname)
             else:
-                self.client.unsave(fullname)
+                await self.client.unsave(fullname)
         except RedditError as e:
-            self.app.call_from_thread(self._revert_save, fullname, not save, str(e))
+            self._revert_save(fullname, not save, str(e))
             return
-        self.app.call_from_thread(
-            self._set_status,
-            f"[#50fa7b]✓ {'saved' if save else 'unsaved'}[/]",
-        )
+        self._set_status(f"[#50fa7b]✓ {'saved' if save else 'unsaved'}[/]")
 
     def _revert_save(self, fullname: str, original: bool, err: str) -> None:
         for p in self.posts:
@@ -353,16 +342,17 @@ class SubredditScreen(Screen):
 
     def load_posts(self) -> None:
         self._set_status("[#ff4500]◌ loading…[/]")
-        self._fetch()
+        self.run_worker(self._fetch(), exclusive=True)
 
-    @work(exclusive=True, thread=True)
-    def _fetch(self) -> None:
+    async def _fetch(self) -> None:
         try:
-            posts = self.client.get_subreddit_posts(self.subreddit, sort=self.sort, limit=50)
+            posts = await self.client.get_subreddit_posts(
+                self.subreddit, sort=self.sort, limit=50
+            )
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._populate, posts)
+        self._populate(posts)
 
     def _score_color(self, score: int) -> str:
         if score >= 10000:
@@ -388,7 +378,6 @@ class SubredditScreen(Screen):
         if len(title) > 90:
             title = title[:87] + "…"
 
-        # Vote arrow indicator
         if p.likes is True:
             arrow = "[#ff4500 bold]▲[/]"
         elif p.likes is False:
@@ -419,12 +408,10 @@ class SubredditScreen(Screen):
             row_key = list(table.rows)[idx]
         except (IndexError, AttributeError):
             return
-        # Update each cell
         try:
             for col_idx, (col_key, value) in enumerate(zip(table.columns, row_data)):
                 table.update_cell(row_key, col_key, value)
         except Exception:
-            # Fallback: rebuild the table
             self._populate(self.posts)
 
     def _populate(self, posts: List[Post]) -> None:

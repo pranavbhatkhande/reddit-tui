@@ -1,7 +1,6 @@
 """Main Textual application."""
 from __future__ import annotations
 
-from textual import work
 from textual.app import App
 from textual.binding import Binding
 
@@ -183,6 +182,35 @@ class RedditTUI(App):
         color: #6c7080;
         padding-top: 1;
     }
+
+    ReplyDialog {
+        align: center middle;
+    }
+    ReplyDialog > #reply-box {
+        width: 90;
+        height: 24;
+        background: #161922;
+        border: round #ff4500;
+        padding: 1 2;
+    }
+    ReplyDialog #reply-prompt {
+        color: #ff4500;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+    ReplyDialog TextArea {
+        background: #0f1117;
+        color: #e8eaf0;
+        border: tall #2a2f3d;
+        height: 1fr;
+    }
+    ReplyDialog TextArea:focus {
+        border: tall #ff4500;
+    }
+    ReplyDialog #reply-hint {
+        color: #6c7080;
+        padding-top: 1;
+    }
     """
 
     BINDINGS = [
@@ -191,20 +219,18 @@ class RedditTUI(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.auth_status: str = ""  # message about auth state
+        self.auth_status: str = ""
         self.auth_config = None
         try:
             self.auth_config = auth_mod.load_config()
         except auth_mod.AuthError as e:
             self.auth_status = f"auth config error: {e}"
 
-        # Build a client up-front. If auth is configured, the token provider
-        # will lazily fetch (and refresh) on first use, off the UI thread.
         if self.auth_config is not None:
             cfg = self.auth_config
 
-            def _provider() -> str:
-                return auth_mod.get_valid_token(cfg).access_token
+            async def _provider() -> str:
+                return (await auth_mod.get_valid_token(cfg)).access_token
 
             self.client = RedditClient(
                 token_provider=_provider,
@@ -215,29 +241,27 @@ class RedditTUI(App):
         else:
             self.client = RedditClient()
 
-    def on_mount(self) -> None:
-        self.push_screen(SubredditScreen(self.client, subreddit="popular"))
+    async def on_mount(self) -> None:
+        await self.push_screen(SubredditScreen(self.client, subreddit="popular"))
         if self.auth_config is not None:
-            self._verify_login()
+            self.run_worker(self._verify_login(), exclusive=True, group="auth")
 
-    @work(exclusive=True, thread=True, group="auth")
-    def _verify_login(self) -> None:
+    async def _verify_login(self) -> None:
         cfg = self.auth_config
         if cfg is None:
             return
         try:
-            auth_mod.get_valid_token(cfg)
+            await auth_mod.get_valid_token(cfg)
         except auth_mod.AuthError as e:
-            self.call_from_thread(self._on_login_failed, str(e))
+            self.SUB_TITLE = "logged out (auth failed)"
+            self.auth_status = f"login failed: {e}"
+            # Replace with anonymous client; close old one.
+            old = self.client
+            self.client = RedditClient(user_agent=old.user_agent)
+            await old.aclose()
             return
-        self.call_from_thread(self._on_login_ok, cfg.username)
-
-    def _on_login_ok(self, username: str) -> None:
-        self.SUB_TITLE = f"logged in as u/{username}"
+        self.SUB_TITLE = f"logged in as u/{cfg.username}"
         self.auth_status = ""
 
-    def _on_login_failed(self, err: str) -> None:
-        self.SUB_TITLE = "logged out (auth failed)"
-        self.auth_status = f"login failed: {err}"
-        # Drop credentials so subsequent calls don't keep retrying.
-        self.client = RedditClient(user_agent=self.client.user_agent)
+    async def on_unmount(self) -> None:
+        await self.client.aclose()

@@ -12,7 +12,6 @@ from typing import List, Optional, Sequence, Tuple
 
 from rich.console import Group, RenderableType
 from rich.text import Text
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -173,7 +172,7 @@ class PostScreen(Screen):
         else:
             body_widget.update("[#6c7080 italic](no text body)[/]")
         self._update_status_hint()
-        self._fetch_comments()
+        self.run_worker(self._fetch_comments(), exclusive=True)
 
     def _update_status_hint(self) -> None:
         try:
@@ -196,7 +195,7 @@ class PostScreen(Screen):
 
     def action_refresh(self) -> None:
         self.query_one("#comments-body", Static).update("[#6c7080]◌ reloading…[/]")
-        self._fetch_comments()
+        self.run_worker(self._fetch_comments(), exclusive=True)
 
     def action_open_url(self) -> None:
         import webbrowser
@@ -206,18 +205,16 @@ class PostScreen(Screen):
         except Exception:
             pass
 
-    @work(exclusive=True, thread=True)
-    def _fetch_comments(self) -> None:
+    async def _fetch_comments(self) -> None:
         try:
-            fresh_post, items = self.client.get_post_with_comments(self.post.permalink)
+            fresh_post, items = await self.client.get_post_with_comments(self.post.permalink)
         except RedditError as e:
-            self.app.call_from_thread(
-                self.query_one("#comments-body", Static).update,
-                f"[#ff5555]✗ failed to load comments: {escape_markup(str(e))}[/]",
+            self.query_one("#comments-body", Static).update(
+                f"[#ff5555]✗ failed to load comments: {escape_markup(str(e))}[/]"
             )
             return
-        self.app.call_from_thread(self._update_post_meta, fresh_post)
-        self.app.call_from_thread(self._render_tree, items)
+        self._update_post_meta(fresh_post)
+        self._render_tree(items)
 
     def _update_post_meta(self, fresh: Post) -> None:
         self.post.likes = fresh.likes
@@ -395,21 +392,21 @@ class PostScreen(Screen):
             self._refresh_post_card()
         else:
             self._redraw_comments()
-        self._send_vote(obj.name, new_dir, kind, old_likes, old_score)
+        self.run_worker(
+            self._send_vote(obj.name, new_dir, kind, old_likes, old_score),
+            group="vote",
+        )
 
-    @work(exclusive=False, thread=True, group="vote")
-    def _send_vote(
+    async def _send_vote(
         self, fullname: str, direction: int, kind: str, old_likes, old_score: int
     ) -> None:
         try:
-            self.client.vote(fullname, direction)
+            await self.client.vote(fullname, direction)
         except RedditError as e:
-            self.app.call_from_thread(
-                self._revert_vote, fullname, kind, old_likes, old_score, str(e)
-            )
+            self._revert_vote(fullname, kind, old_likes, old_score, str(e))
             return
         label = {1: "upvoted", -1: "downvoted", 0: "vote cleared"}.get(direction, "voted")
-        self.app.call_from_thread(self._set_status, f"[#50fa7b]✓ {label}[/]")
+        self._set_status(f"[#50fa7b]✓ {label}[/]")
 
     def _revert_vote(
         self, fullname: str, kind: str, old_likes, old_score: int, err: str
@@ -443,21 +440,18 @@ class PostScreen(Screen):
             self._refresh_post_card()
         else:
             self._redraw_comments()
-        self._send_save(obj.name, target_state, kind)
+        self.run_worker(self._send_save(obj.name, target_state, kind), group="save")
 
-    @work(exclusive=False, thread=True, group="save")
-    def _send_save(self, fullname: str, save: bool, kind: str) -> None:
+    async def _send_save(self, fullname: str, save: bool, kind: str) -> None:
         try:
             if save:
-                self.client.save(fullname)
+                await self.client.save(fullname)
             else:
-                self.client.unsave(fullname)
+                await self.client.unsave(fullname)
         except RedditError as e:
-            self.app.call_from_thread(self._revert_save, fullname, kind, not save, str(e))
+            self._revert_save(fullname, kind, not save, str(e))
             return
-        self.app.call_from_thread(
-            self._set_status, f"[#50fa7b]✓ {'saved' if save else 'unsaved'}[/]"
-        )
+        self._set_status(f"[#50fa7b]✓ {'saved' if save else 'unsaved'}[/]")
 
     def _revert_save(self, fullname: str, kind: str, original: bool, err: str) -> None:
         if kind == "post" and self.post.name == fullname:
@@ -498,21 +492,20 @@ class PostScreen(Screen):
 
         def _cb(value: str | None) -> None:
             if value and value.strip():
-                self._send_reply(parent_fullname, value.strip())
+                self.run_worker(
+                    self._send_reply(parent_fullname, value.strip()), group="reply"
+                )
 
         self.app.push_screen(InputDialog(prompt), _cb)
 
-    @work(exclusive=False, thread=True, group="reply")
-    def _send_reply(self, parent_fullname: str, text: str) -> None:
+    async def _send_reply(self, parent_fullname: str, text: str) -> None:
         try:
-            self.client.submit_comment(parent_fullname, text)
+            await self.client.submit_comment(parent_fullname, text)
         except RedditError as e:
-            self.app.call_from_thread(
-                self._set_status, f"[#ff5555]✗ comment failed: {escape_markup(str(e))}[/]"
-            )
+            self._set_status(f"[#ff5555]✗ comment failed: {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._set_status, "[#50fa7b]✓ comment posted, reloading…[/]")
-        self.app.call_from_thread(self.action_refresh)
+        self._set_status("[#50fa7b]✓ comment posted, reloading…[/]")
+        self.action_refresh()
 
     # ---------- load more ----------
 
@@ -530,18 +523,15 @@ class PostScreen(Screen):
             self._set_status("[yellow]⚠ deep thread continuation not yet supported[/]")
             return
         self._set_status("[#6c7080]◌ loading more…[/]")
-        self._fetch_more(self.post.name, m)
+        self.run_worker(self._fetch_more(self.post.name, m), group="more")
 
-    @work(exclusive=False, thread=True, group="more")
-    def _fetch_more(self, link_fullname: str, placeholder: MoreComments) -> None:
+    async def _fetch_more(self, link_fullname: str, placeholder: MoreComments) -> None:
         try:
-            new_items = self.client.get_more_children(link_fullname, placeholder.children)
+            new_items = await self.client.get_more_children(link_fullname, placeholder.children)
         except RedditError as e:
-            self.app.call_from_thread(
-                self._set_status, f"[#ff5555]✗ load more failed: {escape_markup(str(e))}[/]"
-            )
+            self._set_status(f"[#ff5555]✗ load more failed: {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._splice_more, placeholder, new_items)
+        self._splice_more(placeholder, new_items)
 
     def _splice_more(self, placeholder: MoreComments, new_items: List[object]) -> None:
         """Replace ``placeholder`` in the tree with ``new_items``, re-threading

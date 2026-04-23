@@ -1,25 +1,30 @@
-"""Reddit JSON API client.
+"""Reddit JSON API client (async, httpx-based).
 
 Supports two modes:
-- **Anonymous**: hits https://www.reddit.com/*.json (read-only, no auth).
-- **Authenticated**: hits https://oauth.reddit.com with a Bearer token,
+- **Anonymous**: hits ``https://www.reddit.com/*.json`` (read-only, no auth).
+- **Authenticated**: hits ``https://oauth.reddit.com`` with a Bearer token,
   enabling voting, commenting, saving, subscribed feed, inbox, etc.
+
+All public methods are coroutines. Use ``async with RedditClient(...) as c``
+to ensure the underlying httpx client is closed; or call ``await c.aclose()``
+manually.
 """
 from __future__ import annotations
 
-import json
-import urllib.error
+import asyncio
+import time
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional
+
+import httpx
 
 DEFAULT_USER_AGENT = (
     "reddit-tui/0.3.0 (terminal browser; +https://github.com/anomalyco/reddit-tui)"
 )
 PUBLIC_BASE_URL = "https://www.reddit.com"
 OAUTH_BASE_URL = "https://oauth.reddit.com"
-TIMEOUT = 15
+TIMEOUT = 15.0
 
 
 def clean_sub(name: str) -> str:
@@ -128,14 +133,14 @@ class Comment:
 
 @dataclass
 class MoreComments:
-    """Represents a 't1 kind=more' placeholder pointing at unloaded children."""
+    """Represents a 'kind=more' placeholder pointing at unloaded children."""
 
     id: str
-    name: str  # fullname (often "t1_..." or empty for "continue this thread")
+    name: str
     parent_id: str
     count: int
     depth: int
-    children: List[str] = field(default_factory=list)  # child comment ids
+    children: List[str] = field(default_factory=list)
 
     @classmethod
     def from_json(cls, data: dict, depth: int = 0) -> Optional["MoreComments"]:
@@ -185,82 +190,121 @@ class InboxItem:
         )
 
 
-def _request(
-    url: str,
-    *,
-    token: Optional[str] = None,
-    method: str = "GET",
-    data: Optional[bytes] = None,
-    user_agent: str = DEFAULT_USER_AGENT,
-) -> dict:
-    headers = {"User-Agent": user_agent}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if data is not None:
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-    req = urllib.request.Request(url, headers=headers, data=data, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        raise RedditError(f"HTTP {e.code} fetching {url}") from e
-    except urllib.error.URLError as e:
-        raise RedditError(f"Network error: {e.reason}") from e
-    except TimeoutError as e:
-        raise RedditError("Request timed out") from e
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RedditError("Invalid JSON from Reddit") from e
+# Async token provider returns the bearer access token string.
+TokenProvider = Callable[[], Awaitable[str]]
 
 
 class RedditClient:
-    """Reddit client. If a token provider is supplied, OAuth endpoints are used."""
+    """Async Reddit client. If a token provider is supplied, OAuth endpoints are used."""
 
     def __init__(
         self,
-        token_provider: Optional[Callable[[], str]] = None,
+        token_provider: Optional[TokenProvider] = None,
         username: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> None:
         self._token_provider = token_provider
         self.username = username
         self.user_agent = user_agent or DEFAULT_USER_AGENT
+        self._client = httpx.AsyncClient(
+            headers={"User-Agent": self.user_agent},
+            timeout=TIMEOUT,
+            follow_redirects=True,
+            http2=False,
+        )
+        # Last seen rate-limit headers (for diagnostics / future backoff).
+        self.rl_remaining: Optional[float] = None
+        self.rl_reset_at: Optional[float] = None
+        self._rl_lock = asyncio.Lock()
+
+    async def __aenter__(self) -> "RedditClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     @property
     def authenticated(self) -> bool:
         return self._token_provider is not None
 
-    def _token(self) -> Optional[str]:
+    async def _token(self) -> Optional[str]:
         if self._token_provider is None:
             return None
-        return self._token_provider()
-
-    def _req(
-        self,
-        url: str,
-        *,
-        method: str = "GET",
-        data: Optional[bytes] = None,
-        require_auth: bool = False,
-    ) -> dict:
-        token = self._require_auth() if require_auth else self._token()
-        return _request(
-            url,
-            token=token,
-            method=method,
-            data=data,
-            user_agent=self.user_agent,
-        )
+        return await self._token_provider()
 
     def _base(self) -> str:
         return OAUTH_BASE_URL if self.authenticated else PUBLIC_BASE_URL
 
+    async def _maybe_throttle(self) -> None:
+        """Best-effort backoff if Reddit's rate-limit headers say we're near zero."""
+        async with self._rl_lock:
+            if (
+                self.rl_remaining is not None
+                and self.rl_remaining < 1.0
+                and self.rl_reset_at is not None
+            ):
+                wait = max(0.0, self.rl_reset_at - time.monotonic())
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 5.0))
+
+    def _record_rate_limit(self, resp: httpx.Response) -> None:
+        try:
+            rem = resp.headers.get("x-ratelimit-remaining")
+            reset = resp.headers.get("x-ratelimit-reset")
+            if rem is not None:
+                self.rl_remaining = float(rem)
+            if reset is not None:
+                self.rl_reset_at = time.monotonic() + float(reset)
+        except (TypeError, ValueError):
+            pass
+
+    async def _req(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        data: Optional[dict] = None,
+        require_auth: bool = False,
+    ) -> dict | list:
+        await self._maybe_throttle()
+        headers: dict[str, str] = {}
+        if require_auth:
+            token = await self._token()
+            if not token:
+                raise RedditError("This action requires logging in")
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            token = await self._token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        try:
+            resp = await self._client.request(
+                method, url, headers=headers, data=data
+            )
+        except httpx.TimeoutException as e:
+            raise RedditError("Request timed out") from e
+        except httpx.HTTPError as e:
+            raise RedditError(f"Network error: {e}") from e
+        self._record_rate_limit(resp)
+        if resp.status_code == 401 and require_auth:
+            raise RedditError("Authentication expired or invalid")
+        if resp.status_code == 429:
+            raise RedditError("Rate limited by Reddit (HTTP 429)")
+        if resp.status_code >= 400:
+            raise RedditError(f"HTTP {resp.status_code} fetching {url}")
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise RedditError("Invalid JSON from Reddit") from e
+
     # ---------- read endpoints ----------
 
-    def get_subreddit_posts(
+    async def get_subreddit_posts(
         self,
         subreddit: str,
         sort: str = "hot",
@@ -274,14 +318,16 @@ class RedditClient:
             params["after"] = after
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}/r/{urllib.parse.quote(sub)}/{sort}{suffix}?{urllib.parse.urlencode(params)}"
-        data = self._req(url)
+        data = await self._req(url)
+        if not isinstance(data, dict):
+            return []
         children = data.get("data", {}).get("children", [])
         return [Post.from_json(c) for c in children if c.get("kind") == "t3"]
 
-    def get_frontpage(self, sort: str = "hot", limit: int = 25) -> List[Post]:
-        return self.get_subreddit_posts("popular", sort=sort, limit=limit)
+    async def get_frontpage(self, sort: str = "hot", limit: int = 25) -> List[Post]:
+        return await self.get_subreddit_posts("popular", sort=sort, limit=limit)
 
-    def get_post_with_comments(
+    async def get_post_with_comments(
         self, permalink: str
     ) -> tuple[Post, List[object]]:
         """Return (post, top-level items). Items are Comment or MoreComments."""
@@ -290,7 +336,7 @@ class RedditClient:
             link = link[:-1]
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}{link}{suffix}?raw_json=1&limit=200"
-        data = self._req(url)
+        data = await self._req(url)
         if not isinstance(data, list) or len(data) < 2:
             raise RedditError("Unexpected response shape for post")
         post_listing = data[0].get("data", {}).get("children", [])
@@ -310,13 +356,9 @@ class RedditClient:
                     items.append(m)
         return post, items
 
-    def get_more_children(
+    async def get_more_children(
         self, link_fullname: str, child_ids: List[str], sort: str = "confidence"
     ) -> List[object]:
-        """Expand a 'more' placeholder. Returns flat list of Comment/MoreComments
-        in pre-order; parent linkage is preserved by the comments' parent_id but
-        the caller is responsible for re-threading them under their parents.
-        """
         if not child_ids:
             return []
         params = {
@@ -327,12 +369,10 @@ class RedditClient:
             "raw_json": "1",
         }
         url = f"{self._base()}/api/morechildren?{urllib.parse.urlencode(params)}"
-        data = self._req(url)
-        things = (
-            data.get("json", {}).get("data", {}).get("things", [])
-            if isinstance(data, dict)
-            else []
-        )
+        data = await self._req(url)
+        if not isinstance(data, dict):
+            return []
+        things = data.get("json", {}).get("data", {}).get("things", [])
         out: List[object] = []
         for child in things:
             kind = child.get("kind")
@@ -346,34 +386,32 @@ class RedditClient:
                     out.append(m)
         return out
 
-    def search_subreddits(self, query: str, limit: int = 25) -> List[dict]:
+    async def search_subreddits(self, query: str, limit: int = 25) -> List[dict]:
         params = {"q": query, "limit": str(limit), "raw_json": "1"}
         suffix = ".json" if not self.authenticated else ""
         url = f"{self._base()}/subreddits/search{suffix}?{urllib.parse.urlencode(params)}"
-        data = self._req(url)
+        data = await self._req(url)
+        if not isinstance(data, dict):
+            return []
         children = data.get("data", {}).get("children", [])
         return [c.get("data", {}) for c in children]
 
     # ---------- authenticated-only endpoints ----------
 
-    def _require_auth(self) -> str:
-        token = self._token()
-        if not token:
-            raise RedditError("This action requires logging in")
-        return token
-
-    def get_subscribed_subreddits(self) -> List[str]:
+    async def get_subscribed_subreddits(self) -> List[str]:
         """Return list of subreddit display names the user is subscribed to."""
-        self._require_auth()
+        if not self.authenticated:
+            raise RedditError("This action requires logging in")
         names: List[str] = []
         after: Optional[str] = None
-        # Paginate up to ~500 subscriptions
         for _ in range(5):
             params = {"limit": "100", "raw_json": "1"}
             if after:
                 params["after"] = after
             url = f"{OAUTH_BASE_URL}/subreddits/mine/subscriber?{urllib.parse.urlencode(params)}"
-            data = self._req(url, require_auth=True)
+            data = await self._req(url, require_auth=True)
+            if not isinstance(data, dict):
+                break
             children = data.get("data", {}).get("children", [])
             for c in children:
                 d = c.get("data", {})
@@ -385,37 +423,54 @@ class RedditClient:
                 break
         return sorted(names, key=str.lower)
 
-    def vote(self, fullname: str, direction: int) -> None:
+    async def vote(self, fullname: str, direction: int) -> None:
         """direction: 1=upvote, 0=clear, -1=downvote."""
         if direction not in (-1, 0, 1):
             raise RedditError(f"Invalid vote direction: {direction}")
-        body = urllib.parse.urlencode({"id": fullname, "dir": str(direction)}).encode("utf-8")
-        self._req(f"{OAUTH_BASE_URL}/api/vote", method="POST", data=body, require_auth=True)
-
-    def save(self, fullname: str) -> None:
-        body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        self._req(f"{OAUTH_BASE_URL}/api/save", method="POST", data=body, require_auth=True)
-
-    def unsave(self, fullname: str) -> None:
-        body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        self._req(f"{OAUTH_BASE_URL}/api/unsave", method="POST", data=body, require_auth=True)
-
-    def submit_comment(self, parent_fullname: str, text: str) -> None:
-        body = urllib.parse.urlencode(
-            {"thing_id": parent_fullname, "text": text, "api_type": "json"}
-        ).encode("utf-8")
-        resp = self._req(
-            f"{OAUTH_BASE_URL}/api/comment", method="POST", data=body, require_auth=True
+        await self._req(
+            f"{OAUTH_BASE_URL}/api/vote",
+            method="POST",
+            data={"id": fullname, "dir": str(direction)},
+            require_auth=True,
         )
-        # Reddit returns errors inside json.errors
-        errs = resp.get("json", {}).get("errors", [])
+
+    async def save(self, fullname: str) -> None:
+        await self._req(
+            f"{OAUTH_BASE_URL}/api/save",
+            method="POST",
+            data={"id": fullname},
+            require_auth=True,
+        )
+
+    async def unsave(self, fullname: str) -> None:
+        await self._req(
+            f"{OAUTH_BASE_URL}/api/unsave",
+            method="POST",
+            data={"id": fullname},
+            require_auth=True,
+        )
+
+    async def submit_comment(self, parent_fullname: str, text: str) -> None:
+        resp = await self._req(
+            f"{OAUTH_BASE_URL}/api/comment",
+            method="POST",
+            data={"thing_id": parent_fullname, "text": text, "api_type": "json"},
+            require_auth=True,
+        )
+        errs = (
+            resp.get("json", {}).get("errors", [])
+            if isinstance(resp, dict)
+            else []
+        )
         if errs:
             raise RedditError(f"Comment failed: {errs[0]}")
 
-    def get_inbox(self, only_unread: bool = False) -> List[InboxItem]:
+    async def get_inbox(self, only_unread: bool = False) -> List[InboxItem]:
         endpoint = "unread" if only_unread else "inbox"
         url = f"{OAUTH_BASE_URL}/message/{endpoint}?raw_json=1&limit=50"
-        data = self._req(url, require_auth=True)
+        data = await self._req(url, require_auth=True)
+        if not isinstance(data, dict):
+            return []
         children = data.get("data", {}).get("children", [])
         items: List[InboxItem] = []
         for c in children:
@@ -424,20 +479,24 @@ class RedditClient:
                 items.append(it)
         return items
 
-    def get_unread_count(self) -> int:
+    async def get_unread_count(self) -> int:
         if not self.authenticated:
             return 0
         try:
-            data = self._req(f"{OAUTH_BASE_URL}/api/v1/me", require_auth=True)
+            data = await self._req(f"{OAUTH_BASE_URL}/api/v1/me", require_auth=True)
         except RedditError:
+            return 0
+        if not isinstance(data, dict):
             return 0
         try:
             return int(data.get("inbox_count", 0) or 0)
         except (TypeError, ValueError):
             return 0
 
-    def mark_read(self, fullname: str) -> None:
-        body = urllib.parse.urlencode({"id": fullname}).encode("utf-8")
-        self._req(
-            f"{OAUTH_BASE_URL}/api/read_message", method="POST", data=body, require_auth=True
+    async def mark_read(self, fullname: str) -> None:
+        await self._req(
+            f"{OAUTH_BASE_URL}/api/read_message",
+            method="POST",
+            data={"id": fullname},
+            require_auth=True,
         )

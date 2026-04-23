@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import List
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
@@ -134,14 +133,16 @@ class InboxScreen(Screen):
     def action_refresh(self) -> None:
         self._fetch()
 
-    @work(exclusive=True, thread=True)
     def _fetch(self) -> None:
+        self.run_worker(self._do_fetch(), exclusive=True)
+
+    async def _do_fetch(self) -> None:
         try:
-            items = self.client.get_inbox(only_unread=False)
+            items = await self.client.get_inbox(only_unread=False)
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._populate, items)
+        self._populate(items)
 
     def _set_status(self, msg: str) -> None:
         self.query_one("#inbox-status", Static).update(msg)
@@ -222,14 +223,16 @@ class InboxScreen(Screen):
             return
         self._send_mark_read(it.name, self._focused_idx)
 
-    @work(exclusive=False, thread=True, group="markread")
     def _send_mark_read(self, fullname: str, idx: int) -> None:
+        self.run_worker(self._do_mark_read(fullname, idx), group="markread")
+
+    async def _do_mark_read(self, fullname: str, idx: int) -> None:
         try:
-            self.client.mark_read(fullname)
+            await self.client.mark_read(fullname)
         except RedditError as e:
-            self.app.call_from_thread(self._set_status, f"[#ff5555]✗ {escape_markup(str(e))}[/]")
+            self._set_status(f"[#ff5555]✗ {escape_markup(str(e))}[/]")
             return
-        self.app.call_from_thread(self._on_marked, idx)
+        self._on_marked(idx)
 
     def _on_marked(self, idx: int) -> None:
         if 0 <= idx < len(self.items):

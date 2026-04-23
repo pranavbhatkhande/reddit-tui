@@ -14,28 +14,27 @@ their own client_id/client_secret + username/password. The user must create a
     }
 
 Tokens are cached at ``~/.config/reddit-tui/auth.json`` and refreshed when
-they expire. Token refresh is serialized via a process-wide lock so concurrent
-requests from worker threads can't trigger duplicate refreshes.
+they expire. Refresh is serialized via an asyncio lock so concurrent callers
+don't trigger duplicate refreshes.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
-import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
+
+import httpx
 
 DEFAULT_USER_AGENT = (
     "reddit-tui/0.3.0 (terminal browser; +https://github.com/anomalyco/reddit-tui)"
 )
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-TIMEOUT = 15
+TIMEOUT = 15.0
 
 CONFIG_DIR = Path(
     os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
@@ -43,10 +42,7 @@ CONFIG_DIR = Path(
 CONFIG_PATH = CONFIG_DIR / "config.json"
 TOKEN_PATH = CONFIG_DIR / "auth.json"
 
-# Process-wide refresh lock + in-memory cache. Worker threads that need a
-# token call ``get_valid_token`` concurrently; the lock guarantees only one
-# network refresh happens at a time and the cache avoids re-reading the file.
-_REFRESH_LOCK = threading.Lock()
+_REFRESH_LOCK = asyncio.Lock()
 _CACHED_TOKEN: Optional["TokenStore"] = None
 
 
@@ -118,38 +114,32 @@ def save_token(token: TokenStore) -> None:
         pass
 
 
-def fetch_token(config: AuthConfig) -> TokenStore:
+async def fetch_token(config: AuthConfig) -> TokenStore:
     """Exchange username+password for a bearer token via the script app flow."""
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "password",
-            "username": config.username,
-            "password": config.password,
-        }
-    ).encode("utf-8")
     basic = base64.b64encode(
         f"{config.client_id}:{config.client_secret}".encode("utf-8")
     ).decode("ascii")
-    req = urllib.request.Request(
-        TOKEN_URL,
-        data=body,
-        headers={
-            "User-Agent": config.user_agent,
-            "Authorization": f"Basic {basic}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        method="POST",
-    )
+    headers = {
+        "User-Agent": config.user_agent,
+        "Authorization": f"Basic {basic}",
+    }
+    body = {
+        "grant_type": "password",
+        "username": config.username,
+        "password": config.password,
+    }
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        raise AuthError(f"Auth failed: HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        raise AuthError(f"Network error during auth: {e.reason}") from e
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            resp = await client.post(TOKEN_URL, headers=headers, data=body)
+    except httpx.TimeoutException as e:
+        raise AuthError("Auth request timed out") from e
+    except httpx.HTTPError as e:
+        raise AuthError(f"Network error during auth: {e}") from e
+    if resp.status_code >= 400:
+        raise AuthError(f"Auth failed: HTTP {resp.status_code}")
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
+        data = resp.json()
+    except ValueError as e:
         raise AuthError("Invalid JSON from token endpoint") from e
     if "error" in data or "access_token" not in data:
         raise AuthError(f"Token error: {data.get('error', 'unknown')}")
@@ -162,7 +152,6 @@ def fetch_token(config: AuthConfig) -> TokenStore:
 
 
 def _is_fresh(token: Optional[TokenStore], username: str) -> bool:
-    # 60-second buffer
     return (
         token is not None
         and token.username == username
@@ -170,19 +159,18 @@ def _is_fresh(token: Optional[TokenStore], username: str) -> bool:
     )
 
 
-def get_valid_token(config: AuthConfig, force_refresh: bool = False) -> TokenStore:
+async def get_valid_token(config: AuthConfig, force_refresh: bool = False) -> TokenStore:
     """Return a non-expired token, refreshing if necessary.
 
-    Thread-safe: serialized via a module-level lock. The first thread to enter
-    after expiry will hit the network; subsequent threads get the cached token.
+    Coroutine-safe: serialized via an asyncio lock. Concurrent callers all
+    receive the same freshly-fetched token.
     """
     global _CACHED_TOKEN
 
     if not force_refresh and _is_fresh(_CACHED_TOKEN, config.username):
         return _CACHED_TOKEN  # type: ignore[return-value]
 
-    with _REFRESH_LOCK:
-        # Re-check inside the lock in case another thread refreshed.
+    async with _REFRESH_LOCK:
         if not force_refresh and _is_fresh(_CACHED_TOKEN, config.username):
             return _CACHED_TOKEN  # type: ignore[return-value]
         if not force_refresh:
@@ -190,7 +178,7 @@ def get_valid_token(config: AuthConfig, force_refresh: bool = False) -> TokenSto
             if _is_fresh(disk, config.username):
                 _CACHED_TOKEN = disk
                 return disk  # type: ignore[return-value]
-        token = fetch_token(config)
+        token = await fetch_token(config)
         save_token(token)
         _CACHED_TOKEN = token
         return token
@@ -199,5 +187,4 @@ def get_valid_token(config: AuthConfig, force_refresh: bool = False) -> TokenSto
 def reset_cache() -> None:
     """Clear the in-memory token cache (mainly for tests)."""
     global _CACHED_TOKEN
-    with _REFRESH_LOCK:
-        _CACHED_TOKEN = None
+    _CACHED_TOKEN = None
