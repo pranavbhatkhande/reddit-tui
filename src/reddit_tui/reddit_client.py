@@ -37,7 +37,7 @@ def _build_default_user_agent() -> str:
         return env_ua
 
     try:
-        from reddit_tui import __version__ as _ver  # type: ignore[attr-defined]
+        from reddit_tui import __version__ as _ver  # type: ignore[import-not-found]
     except (ImportError, AttributeError):
         _ver = "0.3.0"
 

@@ -159,8 +159,8 @@ class TestAnonymous403Fallback:
                     "/r/test/comments/abc/test_post/"
                 )
 
-        msg = str(exc_info.value).lower()
-        assert "log in" in msg or "reddit_tui_user_agent" in msg
+        msg = str(exc_info.value)
+        assert "log in" in msg.lower() or "REDDIT_TUI_USER_AGENT" in msg
 
     async def test_authenticated_403_does_not_fall_back(self) -> None:
         """Authenticated (oauth.reddit.com) 403 must NOT trigger old.reddit.com."""
