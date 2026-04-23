@@ -1,11 +1,8 @@
 """Entry point for reddit-tui."""
-from reddit_tui.app import RedditTUI
+import sys
 
-
-def main() -> None:
-    app = RedditTUI()
-    app.run()
+from reddit_tui.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

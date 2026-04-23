@@ -1,17 +1,12 @@
 """Reddit OAuth 2.0 (script app) authentication.
 
 Uses Reddit's "script" app type, which lets a single user authenticate via
-their own client_id/client_secret + username/password. The user must create a
-"script" app at https://www.reddit.com/prefs/apps and store the credentials in
-``~/.config/reddit-tui/config.json``::
+their own client_id/client_secret + username/password.
 
-    {
-      "client_id": "xxxxxxxxxxxxxx",
-      "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxx",
-      "username": "your_reddit_username",
-      "password": "your_reddit_password",
-      "user_agent": "optional custom UA string"
-    }
+Credentials may be provided via either:
+
+1. ``~/.config/reddit-tui/config.json`` (legacy plaintext file), or
+2. The system keyring (recommended). Use ``reddit-tui login`` to store.
 
 Tokens are cached at ``~/.config/reddit-tui/auth.json`` and refreshed when
 they expire. Refresh is serialized via an asyncio lock so concurrent callers
@@ -42,6 +37,9 @@ CONFIG_DIR = Path(
 CONFIG_PATH = CONFIG_DIR / "config.json"
 TOKEN_PATH = CONFIG_DIR / "auth.json"
 
+KEYRING_SERVICE = "reddit-tui"
+KEYRING_FIELDS = ("client_id", "client_secret", "username", "password", "user_agent")
+
 _REFRESH_LOCK = asyncio.Lock()
 _CACHED_TOKEN: Optional["TokenStore"] = None
 
@@ -66,8 +64,60 @@ class TokenStore:
     username: str
 
 
+def _try_keyring() -> Optional[AuthConfig]:
+    """Return AuthConfig from system keyring if all required fields present."""
+    try:
+        import keyring  # type: ignore
+    except Exception:
+        return None
+    try:
+        values = {f: keyring.get_password(KEYRING_SERVICE, f) for f in KEYRING_FIELDS}
+    except Exception:
+        return None
+    required = ("client_id", "client_secret", "username", "password")
+    if not all(values.get(k) for k in required):
+        return None
+    return AuthConfig(
+        client_id=values["client_id"],
+        client_secret=values["client_secret"],
+        username=values["username"],
+        password=values["password"],
+        user_agent=values.get("user_agent") or DEFAULT_USER_AGENT,
+    )
+
+
+def save_to_keyring(cfg: AuthConfig) -> None:
+    """Persist AuthConfig fields to the system keyring. Raises if unavailable."""
+    import keyring  # type: ignore
+
+    keyring.set_password(KEYRING_SERVICE, "client_id", cfg.client_id)
+    keyring.set_password(KEYRING_SERVICE, "client_secret", cfg.client_secret)
+    keyring.set_password(KEYRING_SERVICE, "username", cfg.username)
+    keyring.set_password(KEYRING_SERVICE, "password", cfg.password)
+    keyring.set_password(KEYRING_SERVICE, "user_agent", cfg.user_agent)
+
+
+def delete_from_keyring() -> None:
+    """Best-effort wipe of all keyring entries."""
+    try:
+        import keyring  # type: ignore
+    except Exception:
+        return
+    for f in KEYRING_FIELDS:
+        try:
+            keyring.delete_password(KEYRING_SERVICE, f)
+        except Exception:
+            pass
+
+
 def load_config() -> Optional[AuthConfig]:
-    """Return the user's auth config, or None if not configured."""
+    """Return the user's auth config, or None if not configured.
+
+    Resolution order: keyring → ``~/.config/reddit-tui/config.json``.
+    """
+    kr = _try_keyring()
+    if kr is not None:
+        return kr
     if not CONFIG_PATH.exists():
         return None
     try:

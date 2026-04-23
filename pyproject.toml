@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.scripts]
-reddit-tui = "reddit_tui.__main__:main"
+reddit-tui = "reddit_tui.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
