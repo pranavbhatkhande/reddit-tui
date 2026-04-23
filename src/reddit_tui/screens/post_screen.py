@@ -152,6 +152,12 @@ class PostScreen(Screen):
     def _comments_header_loading(self) -> str:
         return "[#ff4500 bold]── COMMENTS ─────────────────────────────────────[/]"
 
+    def _refresh_post_card(self) -> None:
+        try:
+            self.query_one("#post-card", Static).update(self._post_card())
+        except Exception:
+            pass
+
     def _comments_header_loaded(self, total: int) -> str:
         return (
             f"[#ff4500 bold]── COMMENTS[/] [#8a90a3]({total} threads)[/] "
