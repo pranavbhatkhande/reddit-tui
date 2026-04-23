@@ -38,7 +38,7 @@ def _build_default_user_agent() -> str:
 
     try:
         from reddit_tui import __version__ as _ver  # type: ignore[attr-defined]
-    except Exception:
+    except (ImportError, AttributeError):
         _ver = "0.3.0"
 
     # Stable per-install suffix: first 8 hex chars of SHA-256(hostname+username).
@@ -332,7 +332,7 @@ class RedditClient:
                 and url.startswith(PUBLIC_BASE_URL)
             )
             if is_anonymous_get:
-                fallback_url = OLD_REDDIT_BASE_URL + url[len(PUBLIC_BASE_URL):]
+                fallback_url = url.replace(PUBLIC_BASE_URL, OLD_REDDIT_BASE_URL, 1)
                 try:
                     fb_resp = await self._client.request(
                         method, fallback_url, headers=headers, data=data

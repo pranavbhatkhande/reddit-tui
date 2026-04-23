@@ -129,7 +129,7 @@ class TestAnonymous403Fallback:
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests_seen.append(str(request.url))
-            if "www.reddit.com" in str(request.url):
+            if request.url.host == "www.reddit.com":
                 return httpx.Response(403)
             # old.reddit.com responds with valid payload.
             return httpx.Response(200, json=VALID_COMMENTS_PAYLOAD)
