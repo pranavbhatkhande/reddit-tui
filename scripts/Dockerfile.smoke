@@ -1,0 +1,12 @@
+# Simulates a fresh clone on a brand-new machine: no env vars, default
+# hostname/username, no cached auth. Used to reproduce HTTP 403 reports.
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY scripts ./scripts
+
+RUN pip install --no-cache-dir .
+
+CMD ["python", "scripts/smoke_test.py"]
